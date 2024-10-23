@@ -1,4 +1,5 @@
 **Bank Loan Analysis**
+
 This project analyzes bank loan data using SQL and visualizes key metrics with a Power BI dashboard. It covers loan applications, funded amounts, interest rates, and loan quality (good vs. bad loans), providing insights for data-driven decision-making.
 
 Key Features
