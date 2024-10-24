@@ -3,6 +3,7 @@
 
 This project involves a comprehensive analysis of bank loan data, aimed at understanding key performance metrics such as loan applications, funding amounts, and loan performance over time. The project includes an SQL-based data analysis and a descriptive dashboard created using Power BI to visualize insights.
 
+![Alt text](https://github.com/Dipanwita-23/Data-Science_Projects/blob/main/Bank_Loan_Analysis_Using_SQL_PowerBi/Bank%20loan%20Report_Overview.png)
 
 ## Purpose
 This Bank Loan Analysis project is essential for optimizing the bank’s loan portfolio, minimizing risks, and increasing profitability. The need for such a project arises from several key business objectives:
