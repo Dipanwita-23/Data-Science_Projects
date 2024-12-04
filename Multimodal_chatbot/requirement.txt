@@ -1,0 +1,15 @@
+markdown2
+weaviate-client
+transformers
+dspy-ai
+CairoSVG
+reportlab
+Wand
+lxml
+requests
+beautifulsoup4
+pillow
+google-generativeai 
+langchain-google-genai
+gradio
+
