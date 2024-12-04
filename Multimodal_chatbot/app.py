@@ -11,18 +11,23 @@ import os
 import google.generativeai as genai
 import gradio as gr
 from langchain_core.messages import HumanMessage
-
 from langchain_google_genai import ChatGoogleGenerativeAI
 import weaviate.classes.config as wc
-import json
 
-client = weaviate.Client("http://localhost:8080")
-chatbot = []
-# Configuration
+import warnings
+warnings.filterwarnings('ignore')
+
+# Configure Google API Key
 os.environ['GOOGLE_API_KEY'] = "API_KEY"
 genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
+
+# Initialize CLIP model
 clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+
+# Connect to Weaviate
+client = weaviate.connect_to_local()
+chatbot = []
 
 # Functions for Data Scraping and Processing
 def load_image_from_url(url):
@@ -76,8 +81,8 @@ def create_weaviate_collection(name):
             wc.Property(name="image", data_type=wc.DataType.BLOB),
         ],
         vectorizer_config=wc.Configure.Vectorizer.multi2vec_clip(
-            image_fields=[wc.Multi2VecField(name="image", weight=0.9)],  # 90% of the vector is from the poster
-            text_fields=[wc.Multi2VecField(name="text", weight=0.1)],  # 10% of the vector is from the title
+            image_fields=[wc.Multi2VecField(name="image", weight=0.9)],
+            text_fields=[wc.Multi2VecField(name="text", weight=0.1)],
         ),
         generative_config=wc.Configure.Generative.openai()
     )
@@ -93,7 +98,7 @@ def store_in_weaviate(collection, data):
             "type": "text"
         }
         collection.data.insert(properties=data_object)
-        print(f"stored {item[1]} content")
+        print(f"Stored {item[1]} content")
 
         if item[0].endswith(".png") or item[0].endswith(".jpg"):
             blob_string = get_as_base64(item[0])
@@ -103,106 +108,99 @@ def store_in_weaviate(collection, data):
                 "imageUrl": item[0],
             }
             collection.data.insert(properties=data_object)
-            print(f"stored {item[0]} content")
+            print(f"Stored {item[0]} content")
+    return "Data extracted successfully"
 
 def vectorize_text(text):
-    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-    inputs = processor(text=[text], return_tensors="pt", padding=True, truncation=True)
-    outputs = model.get_text_features(**inputs)
+    inputs = clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+    outputs = clip_model.get_text_features(**inputs)
     return outputs.detach().numpy().flatten().tolist()
 
 def query_data(query, collection):
     query_vector = vectorize_text(query)
     import weaviate.classes.query as wq
+    from weaviate.classes.query import Filter
+
     response = collection.query.hybrid(
-        query=query, limit=4, return_metadata=wq.MetadataQuery(score=True)
+        query=query, limit=5, return_metadata=wq.MetadataQuery(score=True),
+        filters=Filter.by_property("type").equal("image"),
     )
-    return response
+    return response.objects
 
 def extract_data(url):
-    name = "weaviate_new1"
+    client.collections.delete("Data1")
+    name = "Data1"
     image_text_pairs = scrape_and_correlate(url)
     if name not in client.collections.list_all().keys():
         create_weaviate_collection(name)
     collection = client.collections.get(name)
-    store_in_weaviate(collection, image_text_pairs)
+    status = store_in_weaviate(collection, image_text_pairs)
+    return status
 
 def generate_context(data):
     text = []
     images = []
 
     for obj in data:
-        if obj.properties['text'] is not None:
+        if obj.properties['text'] != None:
             text.append(obj.properties['text'])
-        if obj.properties['imageUrl'] is not None:
+        if obj.properties['imageUrl'] != None:
             images.append(obj.properties['imageUrl'])
     return text, images
 
-# Functions for Generative Operations
 def generate_content(text, images, query):
     content = []
-    text = "\n".join(text)
-    content.append({"type": "text",
-                    "text": f"Context: {text}", })
-    content.append({"type": "text",
-                    "text": f"Generate answer from given context and images. {query}. Explain in brief considering all context and in 7-8 lines only", })
+    text = "/n".join(text)
+    content.append({"type": "text", "text": f"Context: {text}"})
+    if "give image" in query:
+        content.append({"type": "text", "text": f"Generate an image based on the query."})
+    else:
+        content.append({"type": "text", "text": f"Generate answer from the context and images. {query}"})
     for img in images:
-        content.append({
-            "type": "image_url",
-            "image_url": img
-        })
+        content.append({"type": "image_url", "image_url": img})
     return content
 
-def generate_image_content(collection, prompt, text):
-    image_descriptions = []
-
+def generate_image_content(collection, prompt, text, file):
     import weaviate.classes.query as wq
     from weaviate.classes.query import Filter
-    img_response = collection.query.hybrid(
-        query=prompt, limit=3, return_metadata=wq.MetadataQuery(score=True),
-        filters=Filter.by_property("type").equal("image"),
-    )
+    from pathlib import Path
 
-    def describe_image(url, text):
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": f"Describe the image as per given below context {text}. Keep it brief and according to context query. 2 to 4 lines",
-                },
-                {
-                    "type": "image_url",
-                    "image_url": url
-                },
-            ]
+    # Fetch images based on the query
+    if file:
+        img_response = collection.query.near_image(
+            near_image=Path(file),
+            limit=2, return_metadata=wq.MetadataQuery(score=True),
+        )
+    else:
+        img_response = collection.query.hybrid(
+            query=prompt, limit=2, return_metadata=wq.MetadataQuery(score=True),
+            filters=Filter.by_property("type").equal("image"),
         )
 
-        output = ChatGoogleGenerativeAI(model="gemini-pro-vision").invoke([message])
-        return output.content
+    # Function to generate a description for an image
+    def describe_image(url, text):
+        message = HumanMessage(
+            content=[{"type": "text", "text": f"Describe the image as per the given context {text}. Keep it brief."},
+                     {"type": "image_url", "image_url": url}]
+        )
+        output = ChatGoogleGenerativeAI(model="gemini-1.5-flash").invoke([message])
+        return output
 
-    images = []
-    for obj in img_response.objects:
-        if obj.properties['imageUrl'] is not None:
-            images.append(obj.properties['imageUrl'])
+    # Prepare the final content with image and description
+    images = [obj.properties['imageUrl'] for obj in img_response.objects]
+    image_descriptions = [describe_image(i, text) for i in images]
 
-    for i in images:
-        response = describe_image(i, text)
-        image_descriptions.append(response)
-    return images, image_descriptions
+    # Pair the image with its description
+    content = []
+    for img_url, description in zip(images, image_descriptions):
+        content.append({"type": "text", "text": description.content})  # Add description text
+        content.append({"type": "image_url", "image_url": img_url})  # Add the image
 
-# Functions for Gradio Interface
-def reset(model, stream, temperature, stop_sequence, top_k, top_p):
-    model.value = "gemini-pro-vision"
-    stream.value = True
-    temperature.value = 0.6
-    stop_sequence.value = ""
-    top_k.value = 8
-    top_p.value = 0.4
+    return content
 
-def gemini_generator_run(prompt, model, stream, temperature, stop_sequence, top_k, top_p):
-    collection = client.collections.get("weaviate_new1")
 
+def gemini_generator_run(prompt, model, stream, temperature, stop_sequence, top_k, top_p, file):
+    GlobantWebData_Coll = client.collections.get("Data1")
     model_config = {
         "model": model,
         "stream": stream,
@@ -211,72 +209,86 @@ def gemini_generator_run(prompt, model, stream, temperature, stop_sequence, top_
         "top_k": top_k,
         "top_p": top_p
     }
-
-    response_objects = query_data(prompt, collection)
-    text, images = generate_context(response_objects.objects)
-    response_images, image_descriptions = generate_image_content(collection, prompt, text)
+    response_objects = query_data(prompt, GlobantWebData_Coll)
+    text, images = generate_context(response_objects)
+    response_images, image_descriptions,extra_value = generate_image_content(GlobantWebData_Coll, prompt, text, file)
     content = generate_content(text, images, prompt)
-
+    
     message = HumanMessage(content=content)
     response = ChatGoogleGenerativeAI(**model_config).invoke([message])
 
-    final_response = []
-    final_response.append(f"<p>{response.content}</p>")
-    for img, desc in zip(response_images, image_descriptions):
-        final_response.append(f"<img src='{img}'>")
-        final_response.append(f"<p>{desc}</p>")
+    final_response = [response.content]
+    for i, j in zip(response_images, image_descriptions):
+        final_response.append(f"Image URL: {i}")
+        final_response.append(f"Description: {j}")
 
-    return " ".join(final_response)
+    return "\n".join(final_response)
 
-def query_message(chatbot, query, model, stream, temperature, stop_sequence, top_k, top_p):
-    response = gemini_generator_run(query, model, stream, temperature, stop_sequence, top_k, top_p)
-    chatbot.append((None, f"<html>{response}</html>"))
-    return chatbot, ""
+def query_message(chatbot, url, query, model, stream, temperature, stop_sequence, top_k, top_p, file):
+    response = gemini_generator_run(query, model, stream, temperature, stop_sequence, top_k, top_p, file)
+    chatbot.append((None, response))
+    return chatbot
 
+def reset():
+    return "gemini-1.5-flash", True, 0.6, "", 8, 0.4
+
+# Main function to integrate Gradio Interface
 def integrate_gradio_interface():
-    with gr.Blocks() as interface:
-        gr.Markdown("<h2><center>Generative Ai model using Google Gemini Pro Vision</center></h2>")
-        gr.Markdown("<center><h3><a href='https://geminiprovision.com/' target='_blank'>Visit More Information about Google Gemini Pro Vision Here</a></h3></center>")
-
+    with gr.Blocks() as demo:
         with gr.Row():
-            with gr.Column(scale=0.70):
-                chatbot = gr.Chatbot()
+            with gr.Column(scale=3):
+                # Chatbot section
+                gr.Markdown("### Chatbot")
+                chatbot = gr.Chatbot(show_copy_button=True, height=500)
+                chatbot.render_css = "overflow-y: scroll; height: 400px;"
+                
+                # User input section: query and file upload
                 with gr.Row():
-                    query = gr.Textbox(show_label=False, placeholder="Enter text here.").style(container=False)
-                    submit = gr.Button("Submit", variant="primary")
-                with gr.Accordion("Parameters", open=False):
-                    model = gr.Textbox(label="Model", value="gemini-pro-vision")
-                    stream = gr.Checkbox(label="Stream", value=True)
-                    temperature = gr.Slider(minimum=0, maximum=1, value=0.6, label="Temperature")
-                    stop_sequence = gr.Textbox(label="Stop sequence", value="")
-                    top_k = gr.Slider(minimum=1, maximum=20, value=8, label="Top-k")
-                    top_p = gr.Slider(minimum=0, maximum=1, value=0.4, label="Top-p")
-                    submit_parameters = gr.Button("Submit Parameters")
-                    submit_parameters.click(
-                        fn=reset,
-                        inputs=[model, stream, temperature, stop_sequence, top_k, top_p],
-                        outputs=[model, stream, temperature, stop_sequence, top_k, top_p]
-                    )
-            with gr.Column(scale=0.30):
-                gr.Examples(
-                    examples=[
-                        "Generate a response on given text",
-                        "Generate an image",
-                        "Generate a response on both text and image",
-                        "Generate a response on both text and image with image content",
-                    ],
-                    inputs=query
-                )
-                gr.Markdown("Use any of the above examples or enter your own query to interact with the model.")
-            submit.click(
-                fn=query_message,
-                inputs=[chatbot, query, model, stream, temperature, stop_sequence, top_k, top_p],
-                outputs=[chatbot, query],
-                queue=False
-            )
+                    with gr.Column(scale=6):
+                        prompt = gr.Textbox(placeholder="Write query", label="Enter your query")
+                    with gr.Column(scale=2):
+                        file = gr.File(label="Upload File")
+                    with gr.Column(scale=2):
+                        button = gr.Button(value="Generate Answer")
+            
+            with gr.Column(scale=1):
+                # URL input and extraction
+                with gr.Column(scale=6):
+                    url_input = gr.Textbox(label="URL", placeholder="Enter URL")
+                with gr.Column(scale=1):
+                    button_extract = gr.Button(value="Extract Information")
+                
+                # Status message output
+                with gr.Row():
+                    status_message = gr.Label(label="Status")
+                
+                # Model parameters section
+                gr.Markdown("### Model Parameters")
+                reset_params = gr.Button(value="Reset")
+                model = gr.Dropdown(value="gemini-1.5-flash", choices=["gemini-pro", "gemini-1.5-flash"],
+                                    label="Model", interactive=True)
+                stream = gr.Radio(label="Streaming", choices=[True, False], value=True, interactive=True)
+                temperature = gr.Slider(value=0.6, minimum=0.1, maximum=1.0, label="Temperature", interactive=True)
+                stop_sequence = gr.Textbox(label="Stop Sequence")
+                
+                # Advanced settings
+                gr.Markdown("### Advanced Settings")
+                top_k = gr.Slider(value=8, minimum=1, maximum=100, label="Top-k", interactive=True)
+                top_p = gr.Slider(value=0.4, minimum=0.1, maximum=1.0, label="Top-p", interactive=True)
 
-    interface.launch()
+        # Button actions
+        button.click(query_message, 
+                     inputs=[chatbot, url_input, prompt, model, stream, temperature, stop_sequence, top_k, top_p, file], 
+                     outputs=chatbot)
+        
+        button_extract.click(fn=extract_data, inputs=[url_input], outputs=[status_message])
+        
+        reset_params.click(fn=reset, 
+                           inputs=[model, stream, temperature, stop_sequence, top_k, top_p], 
+                           outputs=[model, stream, temperature, stop_sequence, top_k, top_p])
 
-# Main Execution
+        demo.launch()
+
+# Main execution
 if __name__ == "__main__":
     integrate_gradio_interface()
