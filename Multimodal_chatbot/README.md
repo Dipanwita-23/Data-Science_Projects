@@ -11,4 +11,4 @@ Gradio interface for easy interaction.
 
 ![image](https://github.com/user-attachments/assets/deb2ebc1-35b5-43bb-89c8-693f5ee46b71)
 
-Demo_link [URL]([url](https://drive.google.com/file/d/1Y1ssB63rwRJbvzMqSlLVtbWIbSf831kj/view?usp=drive_link)) 
+Demo_link [URL]([url](https://drive.google.com/file/d/1Y1ssB63rwRJbvzMqSlLVtbWIbSf831kj/view?usp=drive_link)) https://drive.google.com/file/d/1Y1ssB63rwRJbvzMqSlLVtbWIbSf831kj/view?usp=drive_link
